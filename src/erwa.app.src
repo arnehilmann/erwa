@@ -35,6 +35,7 @@
 		stdlib,
 		crypto,
     jsx,
+    mnesia,
     msgpack
 	]},
 	{mod, {erwa_app, []}},

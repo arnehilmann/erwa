@@ -28,6 +28,7 @@
 
 
 %% API for router
+-export([start_router/0]).
 -export([start_realm/1]).
 -export([stop_realm/1]).
 -export([get_router_for_realm/1]).
@@ -50,6 +51,9 @@
 -export([yield/3,yield/4,yield/5]).
 
 %% for router
+
+start_router() ->
+  erwa_routing:initialize().
 
 %% @doc Start a router for a realm.
 -spec start_realm(Name :: binary() ) -> ok.
