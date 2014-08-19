@@ -14,8 +14,8 @@
                         {roles,[
                                 {broker,[{features,[
                                                     {subscriber_blackwhite_listing,false},
-                                                    {publisher_exclusion,true},
-                                                    {publisher_identification,true},
+                                                    {publisher_exclusion,false},
+                                                    {publisher_identification,false},
                                                     {publication_trustlevels,false},
                                                     {pattern_based_subscription,false},
                                                     {partitioned_pubsub,false},
@@ -26,13 +26,13 @@
                                 {dealer,[{features,[
                                                     {callee_blackwhite_listing,false},
                                                     {caller_exclusion,false},
-                                                    {caller_identification,true},
+                                                    {caller_identification,false},
                                                     {call_trustlevels,false},
                                                     {pattern_based_registration,false},
                                                     {partitioned_rpc,false},
                                                     {call_timeout,false},
                                                     {call_canceling,false},
-                                                    {progressive_call_results,true}
+                                                    {progressive_call_results,false}
                                                     ]}]}]}]).
 
 
@@ -95,7 +95,8 @@
   publisher = undefined,
   subscriber = undefined,
   caller = undefined,
-  callee = undefined
+  callee = undefined,
+  subscriptions = []
 }).
 
 
@@ -128,7 +129,7 @@ create_state() ->
 handle_wamp_message({hello,Realm,Details},#state{sess_id=undefined}) ->
 
 
-  %% TODO: implement a way to chek if authentication is needed
+  %% @todo implement a way to chek if authentication is needed
   %send_message_to({challenge,wampcra,[{challenge,JSON-Data}]},self());
   %ValidRealm = realmAccepptsNew(Realm),
   NewState = validate_peer_details(Details);
@@ -146,24 +147,23 @@ handle_wamp_message({goodbye,_Details,_Reason},#state{goodbye_sent=GB_Sent}=Stat
       true ->
         shutdown;
       _ ->
-        %% @TODO: add a timeout for closing this connection
+        %% @todo add a timeout for closing this connection
        {goodbye,[],goodbye_and_out}
     end,
   {Reply,State#state{goodbye_sent=true}};
 
-handle_wamp_message({subscribe,RequestId,Options,Topic}) ->
+handle_wamp_message({subscribe,RequestId,Options,Topic},State) ->
   {ok,TopicId} = subscribe_to_topic(Pid,Options,Topic,State),
-  send_message_to({subscribed,RequestId,TopicId},self());
-  ok;
+  {{subscribed,RequestId,TopicId},State}
 
-handle_wamp_message({unsubscribe,RequestId,SubscriptionId}) ->
-  case unsubscribe_from_topic(Pid,SubscriptionId,State) of
+handle_wamp_message({unsubscribe,RequestId,SubscriptionId},#state{subscriptions=Subs} = State) ->
+  case lists:member(SubscriptionId,Subs) of
     true ->
-      send_message_to({unsubscribed,RequestId},self());
+      %% @todo remove subscription from database
+      {{unsubscribed,RequestId},State#state{subscriptions=lists:delete(SubscriptionId,Subs)}};
     false ->
-      send_message_to({error,unsubscribe,RequestId,[],no_such_subscription},self())
+      {{error,unsubscribe,RequestId,[],no_such_subscription},State)
   end;
-  ok;
 
 %handle_wamp_message({publish,_RequestId,Options,Topic,Arguments,ArgumentsKw}) ->
 %  {ok,_PublicationId} = send_event_to_topic(Options,Topic,Arguments,ArgumentsKw,State),
