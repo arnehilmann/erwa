@@ -3,9 +3,10 @@
 -export([initialize/0]).
 -export([start_realm/1]).
 -export([stop_realm/1]).
+
+
+-export([create_state/0]).
 -export([handle_wamp_message/1]).
-
-
 
 
 -define(ROUTER_DETAILS,[
@@ -35,6 +36,8 @@
                                                     ]}]}]}]).
 
 
+
+
 -record(realm, {
   name = undefined,
   accept_new = true
@@ -47,7 +50,6 @@
 
   details = undefined,
   requestId = 1,
-  goodbye_sent = false,
   subscriber_blackwhite_listing,
   subscriptions = [],
   registrations = []
@@ -87,6 +89,16 @@
   progressive = false
 }).
 
+-record(state,{
+  sess_id = undefined,
+  goodbye_sent = false,
+  publisher = undefined,
+  subscriber = undefined,
+  caller = undefined,
+  callee = undefined
+}).
+
+
 initialize() ->
   case is_fresh_startup() of
     true -> init_db();
@@ -107,35 +119,37 @@ stop_realm(Name) ->
   mnesia:transaction(T).
 
 
--spec handle_wamp_message(Msg :: term()) -> ok.
-handle_wamp_message({hello,Realm,Details}) ->
-  {ok,SessionId} = create_session(self(),Details),
-  send_message_to({welcome,SessionId,?ROUTER_DETAILS},self());
+
+-spec create_state() -> #state{}.
+create_state() ->
+  #state{}.
+
+-spec handle_wamp_message(Msg :: term(), #state{}) -> {term() | noreply, #state{}}.
+handle_wamp_message({hello,Realm,Details},#state{sess_id=undefined}) ->
+
+
+  %% TODO: implement a way to chek if authentication is needed
   %send_message_to({challenge,wampcra,[{challenge,JSON-Data}]},self());
+  %ValidRealm = realmAccepptsNew(Realm),
+  NewState = validate_peer_details(Details);
 
-handle_wamp_message({authenticate,_Signature,_Extra}) ->
-  send_message_to({abort,[],not_authorized},self());
+  {ok,SessionId} = create_session(Realm,Details),
 
-handle_wamp_message({goodbye,_Details,_Reason}) ->
-  Session = get_session_from_pid(self(),State),
-  SessionId = Session#session.id,
-  case Session#session.goodbye_sent of
-    true ->
-      ok;
-    _ ->
-      T = fun() ->
-            ok = mnesia:write(session,Session#session{goodbye_sent=true})
-          end,
-      mnesia:transaction(T),
-      send_message_to({goodbye,[],goodbye_and_out},self())
-  end,
-  send_message_to(shutdown,self()),
-  ok;
+  {{welcome,SessionId,?ROUTER_DETAILS},NewState};
 
-handle_wamp_message({publish,_RequestId,Options,Topic,Arguments,ArgumentsKw}) ->
-  {ok,_PublicationId} = send_event_to_topic(Options,Topic,Arguments,ArgumentsKw,State),
-  % TODO: send a reply if asked for ...
-  ok;
+%handle_wamp_message({authenticate,_Signature,_Extra},_State) ->
+%  send_message_to({abort,[],not_authorized},self());
+
+handle_wamp_message({goodbye,_Details,_Reason},#state{goodbye_sent=GB_Sent}=State) ->
+  Reply =
+    case GB_Sent of
+      true ->
+        shutdown;
+      _ ->
+        %% @TODO: add a timeout for closing this connection
+       {goodbye,[],goodbye_and_out}
+    end,
+  {Reply,State#state{goodbye_sent=true}};
 
 handle_wamp_message({subscribe,RequestId,Options,Topic}) ->
   {ok,TopicId} = subscribe_to_topic(Pid,Options,Topic,State),
@@ -151,60 +165,75 @@ handle_wamp_message({unsubscribe,RequestId,SubscriptionId}) ->
   end;
   ok;
 
-handle_wamp_message({call,RequestId,Options,Procedure,Arguments,ArgumentsKw}) ->
+%handle_wamp_message({publish,_RequestId,Options,Topic,Arguments,ArgumentsKw}) ->
+%  {ok,_PublicationId} = send_event_to_topic(Options,Topic,Arguments,ArgumentsKw,State),
+  % TODO: send a reply if asked for ...
+%  ok;
+
+%handle_wamp_message({call,RequestId,Options,Procedure,Arguments,ArgumentsKw}) ->
   %case enqueue_procedure_call( Pid, RequestId, Options,Procedure,Arguments,ArgumentsKw,State) of
 %    true ->
 %      ok;
 %    false ->
 %      send_message_to({error,call,RequestId,[],no_such_procedure,undefined,undefined},Pid)
 %  end;
-  ok;
 
-handle_wamp_message({register,RequestId,Options,Procedure}) ->
+%handle_wamp_message({register,RequestId,Options,Procedure}) ->
   %case register_procedure(Pid,Options,Procedure,State) of
 %    {ok,RegistrationId} ->
 %      send_message_to({registered,RequestId,RegistrationId},Pid);
 %    {error,procedure_already_exists} ->
 %      send_message_to({register,error,RequestId,[],procedure_already_exists,undefined,undefined},Pid)
 %  end;
-  ok;
 
-handle_wamp_message({unregister,RequestId,RegistrationId}) ->
+%handle_wamp_message({unregister,RequestId,RegistrationId}) ->
   %case unregister_procedure(Pid,RegistrationId,State) of
 %    true ->
 %      send_message_to({unregistered,RequestId},Pid);
 %    false ->
 %      send_message_to({error,unregister,RequestId,[],no_such_registration,undefined,undefined},Pid)
 %  end;
-  ok;
 
-handle_wamp_message({error,invocation,InvocationId,Details,Error,Arguments,ArgumentsKw}) ->
+
+%handle_wamp_message({error,invocation,InvocationId,Details,Error,Arguments,ArgumentsKw}) ->
   %case dequeue_procedure_call(Pid,InvocationId,Details,Arguments,ArgumentsKw,Error,State) of
 %    {ok} -> ok;
 %    {error,not_found} -> ok;
 %    {error,wrong_session} -> ok
 %  end;
-  ok;
 
-handle_wamp_message({yield,InvocationId,Options,Arguments,ArgumentsKw}) ->
+
+% handle_wamp_message({yield,InvocationId,Options,Arguments,ArgumentsKw}) ->
 %  case dequeue_procedure_call(Pid,InvocationId,Options,Arguments,ArgumentsKw,undefined,State) of
 %    {ok} -> ok;
 %    {error,not_found} -> ok;
 %    {error,wrong_session} -> ok
 %  end;
-  ok;
 
-handle_wamp_message(Msg) ->
+
+handle_wamp_message(Msg,State) ->
   io:format("unknown message ~p~n",[Msg]),
-  ok.
+  {shutdown,State}.
+
+validate_peer_details(Details) ->
+  Roles = lists:keyfind(roles,1,Details),
+  false =/= Roles,
+  Publisher = lists:keyfind(publisher,1,Roles),
+  Subscriber = lists:keymember(subscriber,1,Roles),
+  Caller = lists:keymember(caller,1,Roles),
+  Callee = lists:keymember(callee,1,Roles),
+
+  % supporting at least one role
+  false = (is_atom(Publisher) and is_atom(Subscriber) and is_atom(Caller) and is_atom(Callee)),
 
 
--spec create_session(Pid :: pid(), Details :: list()) -> {ok,non_neg_integer()}.
-create_session(Pid,Details) ->
+
+-spec create_session(Details :: list()) -> {ok,non_neg_integer()}.
+create_session(Details) ->
   Id = gen_id(),
   T = fun() ->
-                  ok = mnesia:write(#session{id=Id,pid=Pid,details=Details})
-                  end,
+        ok = mnesia:write(#session{id=Id,pid=self(),details=Details})
+      end,
   case mnesia:transaction(T) of
     {atomic,ok} -> {ok,Id};
     {aborted,_} -> create_session(Pid,Details)

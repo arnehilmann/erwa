@@ -40,7 +40,5 @@ start_link() ->
 %% supervisor.
 
 init([]) ->
-Procs = [{router_sup,{erwa_router_sup,start_link,[]},permanent,5000,supervisor,[]},
-         {realms,{erwa_realms,start_link,[]},permanent,5000,worker,[]},
-         {con_sup,{erwa_con_sup,start_link,[]},permanent,5000,supervisor,[]}],
+Procs = [{con_sup,{erwa_con_sup,start_link,[]},permanent,5000,supervisor,[]}],
 {ok, {{one_for_one, 10, 10}, Procs}}.
