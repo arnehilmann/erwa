@@ -60,24 +60,14 @@
   id = undefined,
   url = undefined,
 
-
 }).
 
 -record(topic, {
-  url = undefined,
-  id = undefined,
-
-  publishId = 1,
-  subscribers = [],
-  options = undefined
-}).
-
--record(pattern_subscription, {
   id = undefined,
   url = undefined,
-  pattern = undefined,
 
-  topics = []
+
+  subscribers = []
 }).
 
 
@@ -101,11 +91,7 @@
 -record(state,{
   sess_id = undefined,
   goodbye_sent = false,
-  publisher = undefined,
-  subscriber = undefined,
-  caller = undefined,
-  callee = undefined,
-  subscriptions = []
+  topics = []
 }).
 
 
@@ -159,7 +145,8 @@ handle_outgoing_message(Message,State) ->
 
 -spec handle_wamp_message(Msg :: term(), #state{}) -> {term() | noreply | [any()], #state{}}.
 handle_wamp_message({hello,RealmName,Details},#state{sess_id=undefined}) ->
-
+  %% handle the incomming "hello" message
+  %% this should be the first message to come index
   %% @todo implement a way to chek if authentication is needed
   %send_message_to({challenge,wampcra,[{challenge,JSON-Data}]},self());
   T_Realm = fun() ->
@@ -172,7 +159,7 @@ handle_wamp_message({hello,RealmName,Details},#state{sess_id=undefined}) ->
   Realm = mnesia:transaction(T_Realm),
   RealmAccepting = Realm#realm.accept_new,
 
-  %% @todo validate the peer details ... someday
+  %% @todo validate the peer details
   %NewState = validate_peer_details(Details);
 
   case RealmAccepting of
@@ -194,11 +181,11 @@ handle_wamp_message({goodbye,_Details,_Reason},#state{goodbye_sent=GB_Sent}=Stat
   case GB_Sent of
     true ->
       {shutdown,State};
-      _ ->
-        {[{goodbye,[],goodbye_and_out},shutdown],State#state{goodbye_sent=true}}
+    _ ->
+      {[{goodbye,[],goodbye_and_out},shutdown],State#state{goodbye_sent=true}}
   end;
 
-handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{sess_id=SessionId,subscriptions=Subs}=State) ->
+handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{sess_id=SessionId,topics=Topcis}=State) ->
   % there are three different kinds of subscription
   % - basic subscription eg com.example.url
   % - pattern_based_subscription, using the details match "prefix" and "wildcard"
@@ -208,9 +195,22 @@ handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{sess_id=Sessio
   case proplist:get_value(match,Options,exact) of
     exact ->
       % a basic subscription
-      {ok,TopicId,NewState} = subscribe_to_topic(TopicUrl,State),
-      {{subscribed,RequestId,TopicId},NewState};
+      AlreadySubscribed = fun({_Id,Url},Bool) ->
+                            case Url == TopicUrl of
+                              true -> true;
+                              _ -> Bool
+                            end
+                          end,
 
+      case lists:foldl(AlreadySubscribed,false,Topics) of
+        true ->
+          {}
+        false ->
+          {ok,TopicId,NewState} = subscribe_to_topic(TopicUrl,State),
+          {{subscribed,RequestId,TopicId},NewState};
+
+
+    %% @todo think of a way to implement pattern based subscriptions
     %prefix ->
       % a prefix subscription
 
@@ -220,25 +220,8 @@ handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{sess_id=Sessio
 
     _ ->
       % unsupported match
-      {{error,subscribe,RequestId,[],invalid_argument},State}S
+      {{error,subscribe,RequestId,[],invalid_argument},State}
   end;
-
-
-  Topic =
-    case ets:lookup(Ets,Url) of
-      [] ->
-        % create the topic ...
-        {ok,T} = create_topic(Url,Options),
-        T;
-      [UrlTopic] ->
-        Id = UrlTopic#url_topic.topic_id,
-        [T] = ets:lookup(Ets,Id),
-        T
-    end,
-  #topic{id=TopicId,subscribers=Subscribers} = Topic,
-  ets:update_element(Ets,TopicId,{#topic.subscribers,[SessionId|lists:delete(SessionId,Subscribers)]}),
-  ets:update_element(Ets,SessionId,{#session.subscriptions,[TopicId|lists:delete(TopicId,Subs)]}),
-  {ok,TopicId}.
 
 
 
@@ -304,9 +287,10 @@ handle_wamp_message(Msg,State) ->
 
 
 -spec create_session(Details :: list()) -> {ok,non_neg_integer()}.
-create_session(Details) ->
+create_session(Details,State) ->
   Id = gen_id(),
   T = fun() ->
+        [] = mnesia:read(session,Id),
         ok = mnesia:write(#session{id=Id,pid=self(),details=Details})
       end,
   case mnesia:transaction(T) of
@@ -314,104 +298,28 @@ create_session(Details) ->
     {aborted,_} -> create_session(Pid,Details)
   end.
 
--spec subscribe_to_topic(TopicUrl :: binary() ,State :: #state{}) -> {ok,non_neg_integer(),#state{}}.
-subscribe_to_topic(TopicUrl,State) ->
+
+%% subscribe a new session to an existing topic
+-spec subscribe_to_topic(TopicUrl :: binary() ,State :: #state{}) -> {ok,#state{}}.
+subscribe_to_topic(TopicUrl,#state{sess_id=SessionId, topics=Topics} = State) ->
   T = fun() ->
-        case mnesia:read(topic,TopicUrl,write) of
-          [] ->
-            mnesia:
-          [Topic] ->
-
--spec send_event_to_topic(Options :: list(), Url :: binary(), Arguments :: list()|undefined, ArgumentsKw :: list()|undefined) -> {ok,non_neg_integer()}.
-send_event_to_topic(Options,Url,Arguments,ArgumentsKw) ->
-  PublicationId =
-    case ets:lookup(Ets,Url) of
-      [] ->
-        gen_id();
-      [UrlTopic] ->
-        TopicId = UrlTopic#url_topic.topic_id,
-        [Topic] = ets:lookup(Ets,TopicId),
-        IdToPid = fun(Id,Pids) -> [#session{pid=Pid}] = ets:lookup(Ets,Id), [Pid|Pids] end,
-        Session = get_session_from_pid(FromPid,State),
-        Peers =
-          case lists:keyfind(exclude_me,1,Options) of
-            {exclude_me,false} ->
-                lists:foldl(IdToPid,[],Topic#topic.subscribers);
-            _ -> lists:delete(FromPid,lists:foldl(IdToPid,[],Topic#topic.subscribers))
-          end,
-        SubscriptionId = Topic#topic.id,
-        PublishId = gen_id(),
-        Details1 =
-          case lists:keyfind(disclose_me,1,Options) of
-            {disclose_me,true} -> [{publisher,Session#session.id}];
-            _ -> []
-          end,
-        Message = {event,SubscriptionId,PublishId,Details1,Arguments,ArgumentsKw},
-        send_message_to(Message,Peers),
-        PublishId
-    end,
-  {ok,PublicationId}.
+        [Topic] = mnesia:match_object(topic,#topic{url=TopicUrl,_='_'},write),
+        #topic{id=T_Id,url=T_url}=Topic,
+        Subs = [Subscription|Topic#topic.subscribers],
+        ok = mnesia:write(Topic#topic{subscribers=Subs}),
+        {T_Id,T_url}
+      end,
+  {atomic,Entry} = mnesia:transaction(T),
+  {ok,State#state{topics=[Entry|Topcis]}}.
 
 
--spec subscribe_to_topic(Options :: list(), Url :: binary()) -> {ok, non_neg_integer()}.
-subscribe_to_topic(Options,Url) ->
-  Session = get_session_from_pid(self()),
-  SessionId = Session#session.id,
-  Subs = Session#session.subscriptions,
-  Topic =
-    case ets:lookup(Ets,Url) of
-      [] ->
-        % create the topic ...
-        {ok,T} = create_topic(Url,Options),
-        T;
-      [UrlTopic] ->
-        Id = UrlTopic#url_topic.topic_id,
-        [T] = ets:lookup(Ets,Id),
-        T
-    end,
-  #topic{id=TopicId,subscribers=Subscribers} = Topic,
-  ets:update_element(Ets,TopicId,{#topic.subscribers,[SessionId|lists:delete(SessionId,Subscribers)]}),
-  ets:update_element(Ets,SessionId,{#session.subscriptions,[TopicId|lists:delete(TopicId,Subs)]}),
-  {ok,TopicId}.
 
 
--spec create_topic(Url :: binary(), Options :: list) -> {ok,#topic{}}.
-create_topic(Url,Options) ->
-  Id = gen_id(),
-  T = #topic{id=Id,url=Url,options=Options},
-  Trans = fun() ->
-            [] = mnesia:read(topic,Id),
-            ok = mnesia:write(T),
-          end,
-  Topic =
-    case mnesia:transaction(Trans) of
-      true ->
-        true = ets:insert_new(Ets,#url_topic{url=Url,topic_id=Id}),
-        T;
-      false -> create_topic(Url,Options,State)
-    end,
-  {ok,Topic}.
 
 
--spec unsubscribe_from_topic(Pid :: pid(), SubscriptionId :: non_neg_integer()) -> true | false.
-unsubscribe_from_topic(Pid,SubscriptionId) ->
-  Session = get_session_from_pid(Pid),
-  case lists:member(SubscriptionId,Session#session.subscriptions) of
-    false ->
-      false;
 
-    true ->
-      ok = remove_session_from_topic(Session,SubscriptionId),
-      true
-  end.
 
--spec remove_session_from_topic(Session :: #session{}, TopicId :: non_neg_integer()) -> ok | not_found.
-remove_session_from_topic(Session,TopicId) ->
-  SessionId = Session#session.id,
-  [Topic] = ets:lookup(Ets,TopicId),
-  ets:update_element(Ets,TopicId,{#topic.subscribers,lists:delete(SessionId,Topic#topic.subscribers)}),
-  ets:update_element(Ets,SessionId,{#session.subscriptions,lists:delete(TopicId,Session#session.subscriptions)}),
-  ok.
+
 
 -spec send_message_to(Msg :: term(), Peer :: list() |  pid()) -> ok.
 send_message_to(Msg,Pid) when is_pid(Pid) ->
@@ -421,17 +329,6 @@ send_message_to(Msg,Peers) when is_list(Peers) ->
            Pid ! {erwa,Msg} end,
   lists:foreach(Send,Peers),
   ok.
-
--spec get_session_from_pid(Pid :: pid()) -> #session{}|undefined.
-get_session_from_pid(Pid) ->
-  Q = qlc:q([S || S <- mnesia:table(session), S#session.pid = Pid]),
-  T = fun() ->
-        qlc:e(Q)
-      end,
-  case mnesia:transaction(T) of
-    [Session] -> Session;
-    _ -> undefined
-  end.
 
 -spec gen_id() -> non_neg_integer().
 gen_id() ->
