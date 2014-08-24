@@ -419,7 +419,8 @@ to_wamp({goodbye,Details,goodbye_and_out}) ->
 to_wamp({goodbye,Details,Reason}) ->
   [?GOODBYE,dict_to_wamp(Details),Reason];
 
-
+to_wamp({error,subscribe,RequestId,Details,invalid_argument,Arguments,ArgumentsKw}) ->
+  to_wamp({error,?SUBSCRIBE,RequestId,Details,?ERROR_INVALID_ARGUMENT,Arguments,ArgumentsKw});
 to_wamp({error,unsubscribe,RequestId,Details,no_such_subscription,Arguments,ArgumentsKw}) ->
   to_wamp({error,?UNSUBSCRIBE,RequestId,Details,?ERROR_NO_SUCH_SUBSCRIPTION,Arguments,ArgumentsKw});
 to_wamp({error,register,RequestId,Details,procedure_already_exists,Arguments,ArgumentsKw}) ->
@@ -571,7 +572,13 @@ dict_to_wamp(Dict) ->
                       {authrole,<<"authrole">>,false},
                       {authmethod,<<"authmethod">>,false},
                       {authprovider,<<"authprovider">>,false},
-                      {challenge,<<"challenge">>,false}
+                      {challenge,<<"challenge">>,false},
+                      {match,<<"match">>,value},
+                      {exact,<<"exact">>,false},
+                      {prefix,<<"prefix">>,false},
+                      {wildcard,<<"wildcard">>,false},
+                      {nkey,<<"nkey">>,false},
+                      {rkey,<<"rkey">>,false}
                       ]).
 
 
@@ -601,6 +608,7 @@ convert_dict(Direction,[{Key,Value}|T],Converted) ->
     case Deep of
       dict -> convert_dict(Direction,Value,[]);
       list -> convert_list(Direction,Value,[]);
+      value -> convert_value(Direction,Value,[]);
       _ -> Value
     end,
   ConvKey =
@@ -615,24 +623,26 @@ convert_list(_,[],[]) ->
   [];
 convert_list(_,[],Converted) ->
   lists:reverse(Converted);
-convert_list(Direction,[Key|T],Converted) ->
-  KeyPos =
-    case Direction of
-      to_erl -> 2;
-      to_wamp -> 1
-    end,
-  {ErlKey,WampKey} =
-    case lists:keyfind(Key,KeyPos,?DICT_MAPPING) of
-      {Ek,Wk,_} -> {Ek,Wk};
-      false -> {Key,Key}
-    end,
-  ConvKey =
-    case Direction of
-      to_erl -> ErlKey;
-      to_wamp -> WampKey
-    end,
-  convert_list(Direction,T,[ConvKey|Converted]).
+convert_list(Direction,[Value|T],Converted) ->
+  ConvValue = convert_value(Direction,Value),
+  convert_list(Direction,T,[ConvValue|Converted]).
 
+convert_value(Direction,Value) ->
+  KeyPos =
+  case Direction of
+    to_erl -> 2;
+    to_wamp -> 1
+  end,
+  {ErlVal,WampVal} =
+  case lists:keyfind(Value,KeyPos,?DICT_MAPPING) of
+    {Ek,Wk,_} -> {Ek,Wk};
+    false -> {Key,Key}
+  end,
+  ConvValue =
+  case Direction of
+    to_erl -> ErlVal;
+    to_wamp -> WampVal
+  end.
 
 -ifdef(TEST).
 

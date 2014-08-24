@@ -6,7 +6,8 @@
 
 
 -export([create_state/0]).
--export([handle_wamp_message/1]).
+-export([handle_incomming_message/2]).
+-export([handle_outgoing_message/2]).
 
 
 -define(ROUTER_DETAILS,[
@@ -63,12 +64,20 @@
 }).
 
 -record(topic, {
-  id = undefined,
   url = undefined,
+  id = undefined,
 
   publishId = 1,
   subscribers = [],
   options = undefined
+}).
+
+-record(pattern_subscription, {
+  id = undefined,
+  url = undefined,
+  pattern = undefined,
+
+  topics = []
 }).
 
 
@@ -114,10 +123,21 @@ start_realm(Name) ->
   mnesia:transaction(T).
 
 stop_realm(Name) ->
+  %% @todo Need to add a timer to forcefully shut down all existing connections
+  %% @todo update state of sessions that goodbye is sent
   T = fun() ->
-        ok = mnesia:delete(realm,Name)
+        case mnesia:read(realm,Name) of
+          [Realm] ->
+            NewRealm = Realm#realm{accept_new = false},
+            SessionPIDs = mnesia:select(session,[{#session{pid='$1', realm='$2', _='_'},[{'=','$2',Name}],['$1']}]),
+            ok = mnesia:write(NewRealm),
+            SessionPIDs
+          _ ->
+            []
+        end
       end,
-  mnesia:transaction(T).
+  Pids = mnesia:transaction(T),
+  send_message_to({goodbye,[],close_realm},Pids).
 
 
 
@@ -125,36 +145,102 @@ stop_realm(Name) ->
 create_state() ->
   #state{}.
 
--spec handle_wamp_message(Msg :: term(), #state{}) -> {term() | noreply, #state{}}.
-handle_wamp_message({hello,Realm,Details},#state{sess_id=undefined}) ->
 
+handle_incomming_message(Message,State) ->
+  handle_wamp_message(Message,State).
+
+
+
+handle_outgoing_message({goodbye,_Details,_Reason},State) ->
+  State#state{goodbye_sent=true};
+handle_outgoing_message(Message,State) ->
+  State.
+
+
+-spec handle_wamp_message(Msg :: term(), #state{}) -> {term() | noreply | [any()], #state{}}.
+handle_wamp_message({hello,RealmName,Details},#state{sess_id=undefined}) ->
 
   %% @todo implement a way to chek if authentication is needed
   %send_message_to({challenge,wampcra,[{challenge,JSON-Data}]},self());
-  %ValidRealm = realmAccepptsNew(Realm),
-  NewState = validate_peer_details(Details);
+  T_Realm = fun() ->
+              case mnesia:read(realm,RealmName) of
+                [RealmData] -> RealmData;
+                [] -> undefined;
+                _ -> error
+              end
+            end,
+  Realm = mnesia:transaction(T_Realm),
+  RealmAccepting = Realm#realm.accept_new,
 
-  {ok,SessionId} = create_session(Realm,Details),
+  %% @todo validate the peer details ... someday
+  %NewState = validate_peer_details(Details);
 
-  {{welcome,SessionId,?ROUTER_DETAILS},NewState};
+  case RealmAccepting of
+    true ->
+      {ok,SessionId} = create_session(Realm,Details),
+      NewState = State#state{sess_id=SessionId},
+      {{welcome,SessionId,?ROUTER_DETAILS},NewState};
+    _ ->
+      {[{abort,[],no_such_realm},shutdown],State}
+  end;
+handle_wamp_message({hello,RealmName,Details},State) ->
+  % if the hello message is sent twice close the connection
+  {shutdown,State};
 
 %handle_wamp_message({authenticate,_Signature,_Extra},_State) ->
 %  send_message_to({abort,[],not_authorized},self());
 
 handle_wamp_message({goodbye,_Details,_Reason},#state{goodbye_sent=GB_Sent}=State) ->
-  Reply =
-    case GB_Sent of
-      true ->
-        shutdown;
+  case GB_Sent of
+    true ->
+      {shutdown,State};
       _ ->
-        %% @todo add a timeout for closing this connection
-       {goodbye,[],goodbye_and_out}
-    end,
-  {Reply,State#state{goodbye_sent=true}};
+        {[{goodbye,[],goodbye_and_out},shutdown],State#state{goodbye_sent=true}}
+  end;
 
-handle_wamp_message({subscribe,RequestId,Options,Topic},State) ->
-  {ok,TopicId} = subscribe_to_topic(Pid,Options,Topic,State),
-  {{subscribed,RequestId,TopicId},State}
+handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{sess_id=SessionId,subscriptions=Subs}=State) ->
+  % there are three different kinds of subscription
+  % - basic subscription eg com.example.url
+  % - pattern_based_subscription, using the details match "prefix" and "wildcard"
+  % - partitioned ones using nkey and rkey ... not yet understood
+
+
+  case proplist:get_value(match,Options,exact) of
+    exact ->
+      % a basic subscription
+      {ok,TopicId,NewState} = subscribe_to_topic(TopicUrl,State),
+      {{subscribed,RequestId,TopicId},NewState};
+
+    %prefix ->
+      % a prefix subscription
+
+
+    %wildcard ->
+      % a wildcard subscription
+
+    _ ->
+      % unsupported match
+      {{error,subscribe,RequestId,[],invalid_argument},State}S
+  end;
+
+
+  Topic =
+    case ets:lookup(Ets,Url) of
+      [] ->
+        % create the topic ...
+        {ok,T} = create_topic(Url,Options),
+        T;
+      [UrlTopic] ->
+        Id = UrlTopic#url_topic.topic_id,
+        [T] = ets:lookup(Ets,Id),
+        T
+    end,
+  #topic{id=TopicId,subscribers=Subscribers} = Topic,
+  ets:update_element(Ets,TopicId,{#topic.subscribers,[SessionId|lists:delete(SessionId,Subscribers)]}),
+  ets:update_element(Ets,SessionId,{#session.subscriptions,[TopicId|lists:delete(TopicId,Subs)]}),
+  {ok,TopicId}.
+
+
 
 handle_wamp_message({unsubscribe,RequestId,SubscriptionId},#state{subscriptions=Subs} = State) ->
   case lists:member(SubscriptionId,Subs) of
@@ -215,17 +301,6 @@ handle_wamp_message(Msg,State) ->
   io:format("unknown message ~p~n",[Msg]),
   {shutdown,State}.
 
-validate_peer_details(Details) ->
-  Roles = lists:keyfind(roles,1,Details),
-  false =/= Roles,
-  Publisher = lists:keyfind(publisher,1,Roles),
-  Subscriber = lists:keymember(subscriber,1,Roles),
-  Caller = lists:keymember(caller,1,Roles),
-  Callee = lists:keymember(callee,1,Roles),
-
-  % supporting at least one role
-  false = (is_atom(Publisher) and is_atom(Subscriber) and is_atom(Caller) and is_atom(Callee)),
-
 
 
 -spec create_session(Details :: list()) -> {ok,non_neg_integer()}.
@@ -239,6 +314,13 @@ create_session(Details) ->
     {aborted,_} -> create_session(Pid,Details)
   end.
 
+-spec subscribe_to_topic(TopicUrl :: binary() ,State :: #state{}) -> {ok,non_neg_integer(),#state{}}.
+subscribe_to_topic(TopicUrl,State) ->
+  T = fun() ->
+        case mnesia:read(topic,TopicUrl,write) of
+          [] ->
+            mnesia:
+          [Topic] ->
 
 -spec send_event_to_topic(Options :: list(), Url :: binary(), Arguments :: list()|undefined, ArgumentsKw :: list()|undefined) -> {ok,non_neg_integer()}.
 send_event_to_topic(Options,Url,Arguments,ArgumentsKw) ->
