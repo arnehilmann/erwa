@@ -56,11 +56,10 @@
   registrations = []
 }).
 
--record(publication ,{
-  id = undefined,
-  url = undefined,
-
-}).
+%-record(publication ,{
+%  id = undefined,
+%  url = undefined
+%}).
 
 -record(topic, {
   id = undefined,
@@ -117,12 +116,12 @@ stop_realm(Name) ->
             NewRealm = Realm#realm{accept_new = false},
             SessionPIDs = mnesia:select(session,[{#session{pid='$1', realm='$2', _='_'},[{'=','$2',Name}],['$1']}]),
             ok = mnesia:write(NewRealm),
-            SessionPIDs
+            SessionPIDs;
           _ ->
             []
         end
       end,
-  Pids = mnesia:transaction(T),
+  {atomic,Pids} = mnesia:transaction(T),
   send_message_to({goodbye,[],close_realm},Pids).
 
 
@@ -139,12 +138,12 @@ handle_incomming_message(Message,State) ->
 
 handle_outgoing_message({goodbye,_Details,_Reason},State) ->
   State#state{goodbye_sent=true};
-handle_outgoing_message(Message,State) ->
+handle_outgoing_message(_Message,State) ->
   State.
 
 
 -spec handle_wamp_message(Msg :: term(), #state{}) -> {term() | noreply | [any()], #state{}}.
-handle_wamp_message({hello,RealmName,Details},#state{sess_id=undefined}) ->
+handle_wamp_message({hello,RealmName,Details},#state{sess_id=undefined}=State) ->
   %% handle the incomming "hello" message
   %% this should be the first message to come index
   %% @todo implement a way to chek if authentication is needed
@@ -170,7 +169,7 @@ handle_wamp_message({hello,RealmName,Details},#state{sess_id=undefined}) ->
     _ ->
       {[{abort,[],no_such_realm},shutdown],State}
   end;
-handle_wamp_message({hello,RealmName,Details},State) ->
+handle_wamp_message({hello,_RealmName,_Details},State) ->
   % if the hello message is sent twice close the connection
   {shutdown,State};
 
@@ -185,7 +184,7 @@ handle_wamp_message({goodbye,_Details,_Reason},#state{goodbye_sent=GB_Sent}=Stat
       {[{goodbye,[],goodbye_and_out},shutdown],State#state{goodbye_sent=true}}
   end;
 
-handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{sess_id=SessionId,topics=Topcis}=State) ->
+handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{topics=Topics}=State) ->
   % there are three different kinds of subscription
   % - basic subscription eg com.example.url
   % - pattern_based_subscription, using the details match "prefix" and "wildcard"
@@ -195,20 +194,15 @@ handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{sess_id=Sessio
   case proplist:get_value(match,Options,exact) of
     exact ->
       % a basic subscription
-      AlreadySubscribed = fun({_Id,Url},Bool) ->
-                            case Url == TopicUrl of
-                              true -> true;
-                              _ -> Bool
-                            end
-                          end,
-
-      case lists:foldl(AlreadySubscribed,false,Topics) of
-        true ->
-          {}
+      case lists:keyfind(TopicUrl,2,Topics) of
+        {TopicId,TopicUrl} ->
+          %% @todo check if it not should be an error to re-subscribe
+          %% if it is an error, what is the message?
+          {{subscribed,RequestId,TopicId},State};
         false ->
           {ok,TopicId,NewState} = subscribe_to_topic(TopicUrl,State),
-          {{subscribed,RequestId,TopicId},NewState};
-
+          {{subscribed,RequestId,TopicId},NewState}
+      end;
 
     %% @todo think of a way to implement pattern based subscriptions
     %prefix ->
@@ -225,13 +219,13 @@ handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{sess_id=Sessio
 
 
 
-handle_wamp_message({unsubscribe,RequestId,SubscriptionId},#state{subscriptions=Subs} = State) ->
-  case lists:member(SubscriptionId,Subs) of
-    true ->
+handle_wamp_message({unsubscribe,RequestId,SubscriptionId},#state{topics=Topics} = State) ->
+  case lists:keyfind(SubscriptionId,1,Topics) of
+    {SubscriptionId,TopicUrl} ->
       %% @todo remove subscription from database
-      {{unsubscribed,RequestId},State#state{subscriptions=lists:delete(SubscriptionId,Subs)}};
+      {{unsubscribed,RequestId},State#state{topics=lists:delete({SubscriptionId,TopicUrl},Topics)}};
     false ->
-      {{error,unsubscribe,RequestId,[],no_such_subscription},State)
+      {{error,unsubscribe,RequestId,[],no_such_subscription},State}
   end;
 
 %handle_wamp_message({publish,_RequestId,Options,Topic,Arguments,ArgumentsKw}) ->
@@ -286,16 +280,16 @@ handle_wamp_message(Msg,State) ->
 
 
 
--spec create_session(Details :: list()) -> {ok,non_neg_integer()}.
-create_session(Details,State) ->
+-spec create_session(Details :: list(),#state{}) -> {ok,non_neg_integer()}.
+create_session(Realm,Details) ->
   Id = gen_id(),
   T = fun() ->
         [] = mnesia:read(session,Id),
-        ok = mnesia:write(#session{id=Id,pid=self(),details=Details})
+        ok = mnesia:write(#session{id=Id,pid=self(),details=Details,realm=Realm})
       end,
   case mnesia:transaction(T) of
     {atomic,ok} -> {ok,Id};
-    {aborted,_} -> create_session(Pid,Details)
+    {aborted,_} -> create_session(Realm,Details)
   end.
 
 
@@ -305,12 +299,12 @@ subscribe_to_topic(TopicUrl,#state{sess_id=SessionId, topics=Topics} = State) ->
   T = fun() ->
         [Topic] = mnesia:match_object(topic,#topic{url=TopicUrl,_='_'},write),
         #topic{id=T_Id,url=T_url}=Topic,
-        Subs = [Subscription|Topic#topic.subscribers],
+        Subs = [SessionId|Topic#topic.subscribers],
         ok = mnesia:write(Topic#topic{subscribers=Subs}),
         {T_Id,T_url}
       end,
   {atomic,Entry} = mnesia:transaction(T),
-  {ok,State#state{topics=[Entry|Topcis]}}.
+  {ok,State#state{topics=[Entry|Topics]}}.
 
 
 

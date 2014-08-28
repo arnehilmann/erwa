@@ -608,7 +608,7 @@ convert_dict(Direction,[{Key,Value}|T],Converted) ->
     case Deep of
       dict -> convert_dict(Direction,Value,[]);
       list -> convert_list(Direction,Value,[]);
-      value -> convert_value(Direction,Value,[]);
+      value -> convert_value(Direction,Value);
       _ -> Value
     end,
   ConvKey =
@@ -636,9 +636,8 @@ convert_value(Direction,Value) ->
   {ErlVal,WampVal} =
   case lists:keyfind(Value,KeyPos,?DICT_MAPPING) of
     {Ek,Wk,_} -> {Ek,Wk};
-    false -> {Key,Key}
+    false -> {Value,Value}
   end,
-  ConvValue =
   case Direction of
     to_erl -> ErlVal;
     to_wamp -> WampVal
