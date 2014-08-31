@@ -1,3 +1,25 @@
+%%
+%% Copyright (c) 2014 Bas Wegh
+%%
+%% Permission is hereby granted, free of charge, to any person obtaining a copy
+%% of this software and associated documentation files (the "Software"), to deal
+%% in the Software without restriction, including without limitation the rights
+%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+%% copies of the Software, and to permit persons to whom the Software is
+%% furnished to do so, subject to the following conditions:
+%%
+%% The above copyright notice and this permission notice shall be included in all
+%% copies or substantial portions of the Software.
+%%
+%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+%% SOFTWARE.
+%%
+
 -module(erwa_routing).
 
 -export([initialize/0]).
@@ -6,8 +28,7 @@
 
 
 -export([create_state/0]).
--export([handle_incomming_message/2]).
--export([handle_outgoing_message/2]).
+-export([handle_messages/2]).
 
 
 -define(ROUTER_DETAILS,[
@@ -39,47 +60,43 @@
 
 
 
--record(realm, {
+-record(erwa_realm, {
   name = undefined,
-  accept_new = true
+  accept_new = true,
+  pids = []
 }).
 
--record(session, {
-  id = undefined,
-  pid = undefined,
-  realm = undefined,
 
-  details = undefined,
-  requestId = 1,
-  subscriber_blackwhite_listing,
-  subscriptions = [],
-  registrations = []
+-record(erwa_topic, {
+  uri = undefined,
+
+  subscribers = []
 }).
 
-%-record(publication ,{
+%-record(erwa_pub ,{
 %  id = undefined,
-%  url = undefined
+%  uri = undefined
 %}).
 
--record(topic, {
+-record(erwa_exact_sub, {
   id = undefined,
-  url = undefined,
-
+  uri = undefined,
 
   subscribers = []
 }).
 
 
--record(procedure, {
+
+
+-record(erwa_proc, {
   id = undefined,
-  url = undefined,
+  uri = undefined,
 
   options = undefined,
   session_id = undefined
 }).
 
-
--record(invocation, {
+-record(erwa_invoc, {
   id = undefined,
   callee_pid = undefined,
   request_id = undefined,
@@ -87,10 +104,13 @@
   progressive = false
 }).
 
+
+
 -record(state,{
   sess_id = undefined,
   goodbye_sent = false,
-  topics = []
+  details = [],
+  subs = []
 }).
 
 
@@ -101,22 +121,23 @@ initialize() ->
        ok = mnesia:wait_for_tables(Tbls, 1000000)
   end.
 
+-spec start_realm(Name :: binary()) -> ok.
 start_realm(Name) ->
   T = fun() ->
-        ok = mnesia:write(#realm{name=Name})
+        ok = mnesia:write(#erwa_realm{name=Name})
       end,
-  mnesia:transaction(T).
+  {atomic, Result} = mnesia:transaction(T),
+  Result.
 
 stop_realm(Name) ->
   %% @todo Need to add a timer to forcefully shut down all existing connections
   %% @todo update state of sessions that goodbye is sent
   T = fun() ->
-        case mnesia:read(realm,Name) of
+        case mnesia:read(erwa_realm,Name) of
           [Realm] ->
-            NewRealm = Realm#realm{accept_new = false},
-            SessionPIDs = mnesia:select(session,[{#session{pid='$1', realm='$2', _='_'},[{'=','$2',Name}],['$1']}]),
+            NewRealm = Realm#erwa_realm{accept_new = false},
             ok = mnesia:write(NewRealm),
-            SessionPIDs;
+            Realm#erwa_realm.pids;
           _ ->
             []
         end
@@ -130,16 +151,22 @@ stop_realm(Name) ->
 create_state() ->
   #state{}.
 
+-spec handle_messages([term()],#state{}) -> {[any()],#state{}}.
+handle_messages(Messages,State) ->
+  handle_messages(Messages,[],State).
 
-handle_incomming_message(Message,State) ->
-  handle_wamp_message(Message,State).
-
-
-
-handle_outgoing_message({goodbye,_Details,_Reason},State) ->
-  State#state{goodbye_sent=true};
-handle_outgoing_message(_Message,State) ->
-  State.
+-spec handle_messages([term()],[any()],#state{}) -> {[any()],#state{}}.
+handle_messages([],Outgoing,State) ->
+  {lists:reverse(Outgoing),State};
+handle_messages([Message|Tail],Outgoing,State) ->
+  {Reply,NewState} = handle_wamp_message(Message,State),
+  NewOutgoing =
+    case {Reply,is_list(Reply)} of
+      {noreply,_} -> Outgoing;
+      {RL,true} -> lists:reverse(RL) ++ Outgoing;
+      {R,_} -> [R|Outgoing]
+    end,
+  handle_messages(Tail,NewOutgoing,NewState).
 
 
 -spec handle_wamp_message(Msg :: term(), #state{}) -> {term() | noreply | [any()], #state{}}.
@@ -151,12 +178,15 @@ handle_wamp_message({hello,RealmName,Details},#state{sess_id=undefined}=State) -
   T_Realm = fun() ->
               case mnesia:read(realm,RealmName) of
                 [RealmData] -> RealmData;
-                [] -> undefined;
-                _ -> error
+                [] -> undefined
               end
             end,
-  Realm = mnesia:transaction(T_Realm),
-  RealmAccepting = Realm#realm.accept_new,
+  {atomic,Realm} = mnesia:transaction(T_Realm),
+  RealmAccepting =
+    case Realm of
+      undefined -> false;
+      R -> R#erwa_realm.accept_new
+    end,
 
   %% @todo validate the peer details
   %NewState = validate_peer_details(Details);
@@ -173,8 +203,8 @@ handle_wamp_message({hello,_RealmName,_Details},State) ->
   % if the hello message is sent twice close the connection
   {shutdown,State};
 
-%handle_wamp_message({authenticate,_Signature,_Extra},_State) ->
-%  send_message_to({abort,[],not_authorized},self());
+handle_wamp_message({authenticate,_Signature,_Extra},State) ->
+  {[{abort,[],no_such_realm},shutdown],State};
 
 handle_wamp_message({goodbye,_Details,_Reason},#state{goodbye_sent=GB_Sent}=State) ->
   case GB_Sent of
@@ -184,23 +214,22 @@ handle_wamp_message({goodbye,_Details,_Reason},#state{goodbye_sent=GB_Sent}=Stat
       {[{goodbye,[],goodbye_and_out},shutdown],State#state{goodbye_sent=true}}
   end;
 
-handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{topics=Topics}=State) ->
+handle_wamp_message({subscribe,RequestId,Options,SubscriptionURI},#state{subs=Subscriptions}=State) ->
   % there are three different kinds of subscription
-  % - basic subscription eg com.example.url
+  % - basic subscription eg com.example.uri
   % - pattern_based_subscription, using the details match "prefix" and "wildcard"
   % - partitioned ones using nkey and rkey ... not yet understood
 
-
-  case proplist:get_value(match,Options,exact) of
+  case proplists:get_value(match,Options,exact) of
     exact ->
       % a basic subscription
-      case lists:keyfind(TopicUrl,2,Topics) of
-        {TopicId,TopicUrl} ->
-          %% @todo check if it not should be an error to re-subscribe
+      case lists:keyfind(SubscriptionURI,2,Subscriptions) of
+        {SubscriptionId,SubscriptionURI} ->
+          %% @todo check if it is an error to re-subscribe
           %% if it is an error, what is the message?
-          {{subscribed,RequestId,TopicId},State};
+          {{subscribed,RequestId,SubscriptionId},State};
         false ->
-          {ok,TopicId,NewState} = subscribe_to_topic(TopicUrl,State),
+          {ok,SubscriptionId,NewState} = add_to_subscription(SubscriptionURI,State),
           {{subscribed,RequestId,TopicId},NewState}
       end;
 
@@ -221,17 +250,18 @@ handle_wamp_message({subscribe,RequestId,Options,TopicUrl},#state{topics=Topics}
 
 handle_wamp_message({unsubscribe,RequestId,SubscriptionId},#state{topics=Topics} = State) ->
   case lists:keyfind(SubscriptionId,1,Topics) of
-    {SubscriptionId,TopicUrl} ->
-      %% @todo remove subscription from database
-      {{unsubscribed,RequestId},State#state{topics=lists:delete({SubscriptionId,TopicUrl},Topics)}};
+    {SubscriptionId,_TopicUri} ->
+      {ok,NewState} = unsubscribe_from_topic(SubscriptionId,State),
+      {{unsubscribed,RequestId},NewState};
     false ->
       {{error,unsubscribe,RequestId,[],no_such_subscription},State}
   end;
 
-%handle_wamp_message({publish,_RequestId,Options,Topic,Arguments,ArgumentsKw}) ->
-%  {ok,_PublicationId} = send_event_to_topic(Options,Topic,Arguments,ArgumentsKw,State),
+
+handle_wamp_message({publish,_RequestId,Options,Topic,Arguments,ArgumentsKw},State) ->
+  {ok,PublicationId} = send_event_to_topic(Options,Topic,Arguments,ArgumentsKw,State),
   % TODO: send a reply if asked for ...
-%  ok;
+  ok;
 
 %handle_wamp_message({call,RequestId,Options,Procedure,Arguments,ArgumentsKw}) ->
   %case enqueue_procedure_call( Pid, RequestId, Options,Procedure,Arguments,ArgumentsKw,State) of
@@ -280,38 +310,87 @@ handle_wamp_message(Msg,State) ->
 
 
 
--spec create_session(Details :: list(),#state{}) -> {ok,non_neg_integer()}.
-create_session(Realm,Details) ->
+add_this_to_realm(Name) ->
+  T = fun() ->
+        case mnesia:match_object(#erwa_realm{name=Name,_='_'}) of
+          [Realm] ->
+            NewRealm = Realm#erwa_realm{pids=[self()|Realm#erwa_realm.pids]},
+            ok = mnesia:write(NewRealm);
+          [] ->
+            ok
+        end
+      end,
+  {atomic,ok} =mnesia:transaction(T).
+
+maybe_create_topic(TopicUri) ->
+  T = fun() ->
+        case mnesia:match_object(#erwa_topic{uri=TopicUri,_='_'}) of
+          [_Topic] -> true;
+          [] -> false
+        end
+      end,
+  {atomic,Exists} = mnesia:transaction(T),
+  case Exists of
+    false -> create_topic(TopicUri);
+    true -> ok
+  end.
+
+create_topic(TopicUri) ->
   Id = gen_id(),
   T = fun() ->
-        [] = mnesia:read(session,Id),
-        ok = mnesia:write(#session{id=Id,pid=self(),details=Details,realm=Realm})
+        case mnesia:match_object(#erwa_topic{id=Id,_='_'}) of
+          [_Topic] ->
+            false;
+          [] ->
+            ok = mnesia:write(#erwa_topic{id=Id,uri=TopicUri}),
+            true
+        end
       end,
-  case mnesia:transaction(T) of
-    {atomic,ok} -> {ok,Id};
-    {aborted,_} -> create_session(Realm,Details)
+  {atomic,Created} = mnesia:transaction(T),
+  case Created of
+    true -> ok;
+    false -> create_topic(TopicUri)
   end.
 
 
+
+
 %% subscribe a new session to an existing topic
--spec subscribe_to_topic(TopicUrl :: binary() ,State :: #state{}) -> {ok,#state{}}.
-subscribe_to_topic(TopicUrl,#state{sess_id=SessionId, topics=Topics} = State) ->
+-spec add_to_subscription(TopicUri :: binary() ,State :: #state{}) -> {ok,non_neg_integer(),#state{}}.
+add_to_subscription(SubscriptionURI,#state{sess_id=SessionId, subs=Subscriptions} = State) ->
   T = fun() ->
-        [Topic] = mnesia:match_object(topic,#topic{url=TopicUrl,_='_'},write),
-        #topic{id=T_Id,url=T_url}=Topic,
-        Subs = [SessionId|Topic#topic.subscribers],
-        ok = mnesia:write(Topic#topic{subscribers=Subs}),
-        {T_Id,T_url}
+        [Subscription] = mnesia:match_object(erwa_exact_sub,#erwa_exact_sub{uri=TopicUri,_='_'},write),
+        #erwa_topic{id=T_Id,uri=Subscriptions}=Topic,
+        Subs = [SessionId|Topic#erwa_topic.subscribers],
+        ok = mnesia:write(Topic#erwa_topic{subscribers=Subs}),
+        T_Id
       end,
-  {atomic,Entry} = mnesia:transaction(T),
-  {ok,State#state{topics=[Entry|Topics]}}.
+  {atomic,TopicId} = mnesia:transaction(T),
+  {ok,TopicId,State#state{topics=[{TopicId,TopicUri}|Topics]}}.
+
+-spec remove_from_subscription(TopicId :: non_neg_integer() ,State :: #state{}) -> {ok,#state{}}.
+remove_from_subscription(TopicId,#state{sess_id=SessionId, topics=Topics} = State) ->
+  T =
+    fun() ->
+      [Topic] = mnesia:match_object(topic,#erwa_topic{id=TopicId,_='_'},write),
+      #erwa_topic{id=TopicId,uri=Uri}=Topic,
+      Subs = lists:delete(SessionId,Topic#erwa_topic.subscribers),
+      ok = mnesia:write(Topic#erwa_topic{subscribers=Subs}),
+      Uri
+    end,
+  {atomic,TopicUri} = mnesia:transaction(T),
+  {ok,State#state{topics=lists:delete({TopicId,TopicUri},Topics)}}.
 
 
 
-
-
-
-
+send_event_to_topic(Options,TopicUri,Arguments,ArgumentsKw,State) ->
+  ok = maybe_create_topic(TopicUri),
+  T = fun() ->
+        [Topic] = mnesia:match_object(#erwa_topic{uri=TopicUri,_='_'}),
+        #erwa_topic{id=T_Id,uri=TopicUri}=Topic,
+        T_Id
+      end,
+  {atomic,TopicId} = mnesia:transaction(T),
 
 
 
@@ -344,17 +423,74 @@ init_db() ->
   mnesia:create_schema([node()]),
   mnesia:start(),
 
-  {atomic,ok} = mnesia:create_table(realm,[{attributes,record_info(fields,realm)},
+  {atomic,ok} = mnesia:create_table(erwa_realm,[{attributes,record_info(fields,erwa_realm)},
                                              {type,set}]),
-  {atomic,ok} = mnesia:create_table(session,[{attributes,record_info(fields,session)},
-                                             {index,[pid,realm]},
-                                             {type,set}]),
-  {atomic,ok} = mnesia:create_table(topic,[{attributes,record_info(fields,topic)},
-                                           {index,[url]},
+  {atomic,ok} = mnesia:create_table(erwa_topic,[{attributes,record_info(fields,erwa_topic)},
                                            {type,set}]),
-  {atomic,ok} = mnesia:create_table(procedure,[{attributes,record_info(fields,procedure)},
-                                               {index,[url]},
+  {atomic,ok} = mnesia:create_table(erwa_exact_sub,[{attributes,record_info(fields,erwa_exact_sub)},
+                                           {index,[uri]},
+                                           {type,set}]),
+  {atomic,ok} = mnesia:create_table(erwa_proc,[{attributes,record_info(fields,erwa_proc)},
+                                               {index,[uri]},
                                                {type,set}]),
-  {atomic,ok} = mnesia:create_table(invocation,[{attributes,record_info(fields,invocation)},
+  {atomic,ok} = mnesia:create_table(erwa_invoc,[{attributes,record_info(fields,erwa_invoc)},
                                                 {type,set}]),
   ok.
+
+-ifdef(TEST).
+
+abort_test() ->
+  State = create_state(),
+  Msg = {hello,<<"realm1">>,[]},
+  {[{abort,[],no_such_realm},shutdown],_}=handle_wamp_message(Msg,State).
+
+welcome_test() ->
+  State = create_state(),
+  Realm = <<"realm1">>,
+  Msg = {hello,Realm,[]},
+  ok = start_realm(<<"realm1">>),
+  {{welcome,_,?ROUTER_DETAILS},_}=handle_wamp_message(Msg,State).
+
+shutdown_test() ->
+  State = create_state(),
+  Realm = <<"realm1">>,
+  Msg = {hello,Realm,[]},
+  ok = start_realm(<<"realm1">>),
+  {{welcome,_,?ROUTER_DETAILS},NewState}=handle_wamp_message(Msg,State),
+  {shutdown,_} = handle_wamp_message(Msg,NewState).
+
+
+subscribe_test() ->
+  State = create_state(),
+  Realm = <<"realm1">>,
+  Msg = {hello,Realm,[]},
+  ok = start_realm(<<"realm1">>),
+  {{welcome,_SessionId,?ROUTER_DETAILS},State2}=handle_wamp_message(Msg,State),
+  TopicUri = <<"topic1">>,
+  RequestId = gen_id(),
+  {{subscribed,RequestId,_},_} = handle_wamp_message({subscribe,RequestId,[],TopicUri},State2).
+
+unsubscribe_test() ->
+  State = create_state(),
+  Realm = <<"realm1">>,
+  Msg = {hello,Realm,[]},
+  ok = start_realm(<<"realm1">>),
+  {{welcome,_,?ROUTER_DETAILS},State2}=handle_wamp_message(Msg,State),
+  TopicUri = <<"topic1">>,
+  SubRequestId = gen_id(),
+  {{subscribed,SubRequestId,TopicId},State3} = handle_wamp_message({subscribe,SubRequestId,[],TopicUri},State2),
+  UnsubRequestId = gen_id(),
+  {{unsubscribed,UnsubRequestId},_} = handle_wamp_message({unsubscribe,UnsubRequestId,TopicId},State3).
+
+unsubscribe_error_test() ->
+  State = create_state(),
+  Realm = <<"realm1">>,
+  Msg = {hello,Realm,[]},
+  ok = start_realm(<<"realm1">>),
+  {{welcome,_,?ROUTER_DETAILS},State2}=handle_wamp_message(Msg,State),
+  RequestId = gen_id(),
+  TopicId = gen_id(),
+  {{error,unsubscribe,RequestId,_,no_such_subscription},_} = handle_wamp_message({unsubscribe,RequestId,TopicId},State2).
+
+
+-endif.

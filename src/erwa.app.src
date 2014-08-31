@@ -27,16 +27,15 @@
 	{modules, []},
 	{registered, [
     erwa_con_sup,
-    erwa_realms,
-    erwa_router_sup
+    erwa_realms
   ]},
 	{applications, [
-		kernel,
-		stdlib,
-		crypto,
-    jsx,
+    crypto,
+		jsx,
+    kernel,
     mnesia,
-    msgpack
+    msgpack,
+		stdlib
 	]},
 	{mod, {erwa_app, []}},
 	{env, []}

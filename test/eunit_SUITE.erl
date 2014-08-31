@@ -26,14 +26,25 @@
 
 %% ct.
 -export([all/0]).
+-export([init_per_suite/1]).
+-export([end_per_suite/1]).
 
 %% Tests.
 -export([eunit/1]).
+
 
 %% ct.
 
 all() ->
 	[eunit].
+
+init_per_suite(Config) ->
+  {ok,_} = application:ensure_all_started(mnesia),
+  erwa_routing:initialize(),
+  Config.
+
+end_per_suite(Config) ->
+  Config.
 
 eunit(_) ->
 	ok = eunit:test({application, erwa}).

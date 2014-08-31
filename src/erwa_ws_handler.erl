@@ -38,7 +38,7 @@
 
 -record(state,{
   enc = undefined,
-  router = undefined,
+  routing = undefined,
   buffer = <<"">>
                }).
 
@@ -48,19 +48,20 @@ init({Transport, http}, _Req, _Opts) when Transport == tcp; Transport == ssl ->
 websocket_init(_TransportName, Req, _Opts) ->
   % need to check for the wamp.2.json or wamp.2.msgpack
   {ok, Protocols, Req1} = cowboy_req:parse_header(?SUBPROTHEADER, Req),
+  Routing = erwa_routing:create_state(),
   case lists:nth(1,Protocols) of
       ?WSMSGPACK ->
         Req2  = cowboy_req:set_resp_header(?SUBPROTHEADER,?WSMSGPACK,Req1),
-        {ok,Req2,#state{enc=msgpack}};
+        {ok,Req2,#state{enc=msgpack,routing=Routing}};
       ?WSMSGPACK_BATCHED ->
         Req2  = cowboy_req:set_resp_header(?SUBPROTHEADER,?WSMSGPACK_BATCHED,Req1),
-        {ok,Req2,#state{enc=msgpack_batched}};
+        {ok,Req2,#state{enc=msgpack_batched,routing=Routing}};
       ?WSJSON ->
         Req2  = cowboy_req:set_resp_header(?SUBPROTHEADER,?WSJSON,Req1),
-        {ok,Req2,#state{enc=json}};
+        {ok,Req2,#state{enc=json,routing=Routing}};
       ?WSJSON_BATCHED ->
         Req2  = cowboy_req:set_resp_header(?SUBPROTHEADER,?WSJSON_BATCHED,Req1),
-        {ok,Req2,#state{enc=json_batched}};
+        {ok,Req2,#state{enc=json_batched,routing=Routing}};
       _ ->
         {shutdown,Req1}
   end.
@@ -92,10 +93,10 @@ websocket_terminate(_Reason, _Req, _State) ->
   ok.
 
 
-handle_wamp(Data,#state{buffer=Buffer, enc=Enc, router=Router}=State) ->
+handle_wamp(Data,#state{buffer=Buffer, enc=Enc, routing=Routing}=State) ->
   {Messages,NewBuffer} = erwa_protocol:deserialize(<<Buffer/binary, Data/binary>>,Enc),
-  {ok,NewRouter} = erwa_protocol:forward_messages(Messages,Router),
-  {ok,State#state{router=NewRouter,buffer=NewBuffer}}.
+  {ok,NewRouting} = erwa_routing:handle_messages(Messages,Routing),
+  {ok,State#state{routing=NewRouting,buffer=NewBuffer}}.
 
 -ifdef(TEST).
 

@@ -23,7 +23,6 @@
 %% @private
 -module(erwa_protocol).
 
--export([forward_messages/2]).
 -export([deserialize/2]).
 -export([serialize/2]).
 -export([to_wamp/1]).
@@ -98,26 +97,6 @@ serialize(Message,raw_json) ->
   Enc = jsx:encode(Message),
   Len = byte_size(Enc),
   <<Len:32/unsigned-integer-big,Enc/binary>>.
-
--spec forward_messages(Messages :: list(), Router :: pid() | undefined) -> {ok,Router :: pid() | undefined} | {error,not_found}.
-forward_messages([],Router) ->
-  {ok,Router};
-forward_messages([{hello,Realm,_}|_]=Messages,undefined) ->
-  case erwa_realms:get_router(Realm) of
-    {ok,Pid} ->
-      forward_messages(Messages,Pid);
-    {error,not_found} ->
-      self() ! {erwa,{abort,[{}],no_such_realm}},
-      self() ! {erwa, shutdown},
-      {error,undefined}
-  end;
-forward_messages([Msg|T],Router) when is_pid(Router) ->
-  ok = erwa_router:handle_wamp(Router,Msg),
-  forward_messages(T,Router);
-forward_messages(_,undefined)  ->
-  self() ! {erwa,{abort,[{}],no_such_realm}},
-  self() ! {erwa, shutdown},
-  {error,undefined}.
 
 
 
@@ -570,6 +549,7 @@ dict_to_wamp(Dict) ->
                       {anonymous,<<"anonymous">>,false},
                       {authid,<<"authid">>,false},
                       {authrole,<<"authrole">>,false},
+                      {authmethods,<<"authmethods">>,false},
                       {authmethod,<<"authmethod">>,false},
                       {authprovider,<<"authprovider">>,false},
                       {challenge,<<"challenge">>,false},
@@ -673,19 +653,18 @@ roundtrip_test() ->
               ],
 
 
-  Serializer = fun(Message,Res) ->
+  Serializer = fun(Message,Boolean) ->
 
                  Encodings = [json,msgpack,raw_json,raw_msgpack],
-
                  Check = fun(Enc,Bool) ->
-                           EncMsg = serialize(Message,Enc),
-                           DeEncMsg = deserialize(EncMsg,Enc) ,
-                           case DeEncMsg of
+                           SerMsg = serialize(Message,Enc),
+                           DeSerMsg = deserialize(SerMsg,Enc) ,
+                           case DeSerMsg of
                              {[Message],<<"">>} -> Bool;
                              _ -> false
                            end
                          end,
-               Res and lists:foldl(Check,true,Encodings)
+               Boolean and lists:foldl(Check,true,Encodings)
                end,
 
   true = lists:foldl(Serializer,true,Messages).

@@ -50,7 +50,7 @@
                closed,
                error,
                buffer = <<"">>,
-               router = undefined
+               routing = undefined
               }).
 
 -define(TIMEOUT,60000).
@@ -64,7 +64,8 @@ init(Ref, Socket, Transport, _Opts = []) ->
     ok = ranch:accept_ack(Ref),
     {Ok,Closed, Error} = Transport:messages(),
     ok = Transport:setopts(Socket, [{active, once}]),
-    gen_server:enter_loop(?MODULE, [], #state{socket=Socket,transport=Transport,ok=Ok,closed=Closed,error=Error}).
+    Routing = erwa_routing:create_state(),
+    gen_server:enter_loop(?MODULE, [], #state{socket=Socket,transport=Transport,ok=Ok,closed=Closed,error=Error,routing=Routing}).
 
 
 init(_Opts) ->
@@ -77,12 +78,12 @@ handle_cast(_Request, State) ->
   {noreply, State}.
 
 
-handle_info({OK,Socket,Data},  #state{ok=OK,socket=Socket,transport=Transport,buffer=Buf,router=Router}=State) ->
+handle_info({OK,Socket,Data},  #state{ok=OK,socket=Socket,transport=Transport,buffer=Buf,routing=Routing}=State) ->
   Transport:setopts(Socket, [{active, once}]),
   Buffer = <<Buf/binary, Data/binary>>,
   {Messages,NewBuffer} = erwa_protocol:deserialize(Buffer,raw_msgpack),
-  {ok,NewRouter} = erwa_protocol:forward_messages(Messages,Router),
-  {noreply, State#state{buffer=NewBuffer,router=NewRouter}};
+  {ok,NewRouting} = erwa_protocol:forward_messages(Messages,Routing),
+  {noreply, State#state{buffer=NewBuffer,routing=NewRouting}};
 handle_info({Closed,Socket}, #state{closed=Closed,socket=Socket}=State) ->
   %erwa_protocol:close(connection_closed,ProtState),
   {stop, normal, State};
