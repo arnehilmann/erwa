@@ -169,6 +169,8 @@ start_link(Args) ->
 
 -spec init(Params :: list() ) -> {ok,#state{}}.
 init([Realm]) ->
+	io:format("erwa_router:init ~p~n", [self()]),
+	register(erwa_router, self()),
   Ets = ets:new(erwa_router,[?TABLE_ACCESS,set,{keypos,2}]),
   {ok,#state{realm=Realm,ets=Ets}}.
 
@@ -193,7 +195,14 @@ handle_cast(_Request, State) ->
 handle_info({'DOWN',Ref,process,_Pid,_Reason},State) ->
   remove_session_with_ref(Ref,State),
   {noreply,State};
-handle_info(_Info, State) ->
+handle_info(Info, State) ->
+        try
+            io:format("erwa_router:handle_info ~p ~p~n", [Info, State]),
+            ok = handle_wamp_message(Info, self(), State)
+        catch
+            Error:Reason ->
+                io:format("~nerror in router:~n~p~n", [erlang:get_stacktrace()])
+        end,
 	{noreply, State}.
 
 terminate(_Reason, _State) ->
