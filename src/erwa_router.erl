@@ -170,7 +170,7 @@ start_link(Args) ->
 -spec init(Params :: list() ) -> {ok,#state{}}.
 init([Realm]) ->
 	io:format("erwa_router for ~p: ~p~n", [Realm, self()]),
-    gproc:reg({p, l, erwa_router}, Realm),
+    gproc:reg({p, l, {router, Realm}}),
   Ets = ets:new(erwa_router,[?TABLE_ACCESS,set,{keypos,2}]),
   {ok,#state{realm=Realm,ets=Ets}}.
 
