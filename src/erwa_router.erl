@@ -169,8 +169,8 @@ start_link(Args) ->
 
 -spec init(Params :: list() ) -> {ok,#state{}}.
 init([Realm]) ->
-	io:format("erwa_router for ~p: ~p~n", [Realm, self()]),
-    gproc:reg({p, l, {router, Realm}}),
+%    io:format("erwa_router for ~p: ~p~n", [Realm, self()]),
+%    gproc:reg({p, l, {router, Realm}}),
   Ets = ets:new(erwa_router,[?TABLE_ACCESS,set,{keypos,2}]),
   {ok,#state{realm=Realm,ets=Ets}}.
 
@@ -197,7 +197,7 @@ handle_info({'DOWN',Ref,process,_Pid,_Reason},State) ->
   {noreply,State};
 handle_info(Info, State) ->
         try
-            io:format("erwa_router:handle_info ~p ~p~n", [Info, State]),
+            io:format("erwa_router:handle_info~n    ~p~n    ~p~n", [Info, State]),
             ok = handle_wamp_message(Info, self(), State)
         catch
             _Error:_Reason ->
@@ -211,6 +211,13 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
 	{ok, State}.
 
+
+forward_to_nodes(_, _, []) ->
+    ok;
+forward_to_nodes(Data, Realm, [Node|Rest]) ->
+    io:format("forward event to ~p~n", [Node]),
+    {forwards, Node} ! {self(), Realm, Data},
+    forward_to_nodes(Data, Realm, Rest).
 
 
 
@@ -235,11 +242,17 @@ handle_wamp_message({goodbye,_Details,_Reason},Pid,#state{ets=Ets}=State) ->
   end,
   send_message_to(shutdown,Pid);
 
-handle_wamp_message({publish,_RequestId,Options,Topic,Arguments,ArgumentsKw},Pid,State) ->
+handle_wamp_message({publish,_RequestId,Options,Topic,Arguments,ArgumentsKw},Pid,#state{realm=Realm}=State) ->
+    io:format("realm ~p: publishing on topic ~p~n", [Realm, Topic]),
   {ok,_PublicationId} = send_event_to_topic(Pid,Options,Topic,Arguments,ArgumentsKw,State),
+  ok = forward_to_nodes({Pid, Options, Topic, Arguments, ArgumentsKw}, Realm, nodes()),
   % TODO: send a reply if asked for ...
   ok;
 
+handle_wamp_message({forwarded,{_RequestId,Options,Topic,Arguments,ArgumentsKw}},Pid,#state{realm=Realm}=State) ->
+    io:format("realm ~p: forwarded event received on topic ~p~n", [Realm, Topic]),
+    {ok,_PublicationId} = send_event_to_topic(Pid,Options,Topic,Arguments,ArgumentsKw,State),
+    ok;
 handle_wamp_message({subscribe,RequestId,Options,Topic},Pid,State) ->
   {ok,TopicId} = subscribe_to_topic(Pid,Options,Topic,State),
   send_message_to({subscribed,RequestId,TopicId},Pid);
