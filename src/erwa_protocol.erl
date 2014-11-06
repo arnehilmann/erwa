@@ -105,7 +105,6 @@ forward_messages([],Router) ->
 forward_messages([{hello,Realm,_}|_]=Messages,undefined) ->
   case erwa_realms:get_router(Realm) of
     {ok,Pid} ->
-      gproc:reg({p, l, {realm, Pid}}, Realm),
       forward_messages(Messages,Pid);
     {error,not_found} ->
       self() ! {erwa,{abort,[{}],no_such_realm}},
