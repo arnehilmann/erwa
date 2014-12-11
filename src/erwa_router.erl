@@ -197,7 +197,6 @@ handle_info({'DOWN',Ref,process,_Pid,_Reason},State) ->
   {noreply,State};
 handle_info(Info, State) ->
         try
-            io:format("erwa_router:handle_info~n    ~p~n    ~p~n", [Info, State]),
             ok = handle_wamp_message(Info, self(), State)
         catch
             _Error:_Reason ->
